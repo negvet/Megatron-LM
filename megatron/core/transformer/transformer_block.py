@@ -3,6 +3,7 @@
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import List, Optional, Union
+import os
 
 import torch
 from torch import Tensor
@@ -512,12 +513,15 @@ class TransformerBlock(MegatronModule):
                 fp8_format = transformer_engine.common.recipe.Format.HYBRID
             else:
                 raise ValueError("E4M3 and HYBRID are the only supported FP8 formats.")
-
-            fp8_recipe = TEDelayedScaling(
-                config=self.config,
-                fp8_format=fp8_format,
-                override_linear_precision=(False, False, not self.config.fp8_wgrad),
-            )
+            
+            if bool(int(os.environ.get('NVTE_CS', '0'))):
+                fp8_recipe = transformer_engine.common.recipe.Float8CurrentScaling()
+            else:
+                fp8_recipe = TEDelayedScaling(
+                    config=self.config,
+                    fp8_format=fp8_format,
+                    override_linear_precision=(False, False, not self.config.fp8_wgrad),
+                )
             fp8_group = None
             if parallel_state.model_parallel_is_initialized():
                 fp8_group = parallel_state.get_amax_reduction_group(
