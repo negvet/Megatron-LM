@@ -630,6 +630,8 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
         v_channels: Optional[int] = None,
         cp_comm_type: str = "p2p",
     ):
+        self.step_num = 0
+        self.layer_num = layer_number
         self.config = config
         self.te_forward_mask_type = False
         self.qkv_format: str = 'sbhd'
@@ -762,6 +764,26 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
         packed_seq_params: PackedSeqParams = None,
     ):
         """Forward."""
+        self.step_num += 1
+        print(f"step: {self.step_num}, layer number: {self.layer_num}")
+
+        if self.step_num <= 15 and self.layer_num == 1:
+            # Create debug directory if it doesn't exist
+            os.makedirs('/home/scratch.etsykunov_ent/scripts/te1_vs_te2_fp8/debug_tensors', exist_ok=True)
+            
+            # Generate a unique filename
+            filename = f'/home/scratch.etsykunov_ent/scripts/te1_vs_te2_fp8/debug_tensors/core_attn_in_q_layer_{self.layer_num}_step_{self.step_num}.pt'
+            torch.save(query.detach().clone(), filename)
+            filename = f'/home/scratch.etsykunov_ent/scripts/te1_vs_te2_fp8/debug_tensors/core_attn_in_k_layer_{self.layer_num}_step_{self.step_num}.pt'
+            torch.save(key.detach().clone(), filename)
+            filename = f'/home/scratch.etsykunov_ent/scripts/te1_vs_te2_fp8/debug_tensors/core_attn_in_v_layer_{self.layer_num}_step_{self.step_num}.pt'
+            torch.save(value.detach().clone(), filename)
+            filename = f'/home/scratch.etsykunov_ent/scripts/te1_vs_te2_fp8/debug_tensors/core_attn_in_mask_layer_{self.layer_num}_step_{self.step_num}.pt'
+            torch.save(attention_mask.detach().clone(), filename)
+            if attention_bias is not None:
+                filename = f'/home/scratch.etsykunov_ent/scripts/te1_vs_te2_fp8/debug_tensors/core_attn_in_bias_layer_{self.layer_num}_step_{self.step_num}.pt'
+                torch.save(attention_bias.detach().clone(), filename)
+
         packed_seq_kwargs = (
             {key: getattr(packed_seq_params, key) for key in self.kept_packed_seq_params}
             if packed_seq_params is not None
@@ -819,6 +841,16 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
             core_attn_out = super().forward(
                 query, key, value, attention_mask, **attention_bias_kwargs, **packed_seq_kwargs
             )
+
+        if self.step_num <= 15 and self.layer_num == 1:
+            # Create debug directory if it doesn't exist
+            os.makedirs('/home/scratch.etsykunov_ent/scripts/te1_vs_te2_fp8/debug_tensors', exist_ok=True)
+            
+            # Generate a unique filename
+            filename = f'/home/scratch.etsykunov_ent/scripts/te1_vs_te2_fp8/debug_tensors/core_attn_out_layer_{self.layer_num}_step_{self.step_num}.pt'
+            
+            # Save the tensor for inspection
+            torch.save(core_attn_out.detach().clone(), filename)
 
         if self.config.apply_rope_fusion and qkv_format == 'bshd':
             return core_attn_out.transpose(0, 1)
