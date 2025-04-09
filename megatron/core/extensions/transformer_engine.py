@@ -45,6 +45,14 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_te_version, is_te_min_version
 
+LOG_OPS = False
+LOG_DIR = "compare_te1_te2_fp8"
+_dump_debug_tensors_layer_norm_linear = False
+_dump_debug_tensors_attn = False
+
+_te_linear_counter = 0
+_te_layernorm_linear_counter = 0
+
 
 def _get_extra_te_kwargs(config: TransformerConfig):
     extra_transformer_engine_kwargs = {"params_dtype": config.params_dtype}
@@ -72,6 +80,9 @@ class TENorm:
 
     # TODO should we ditch normalization config and just use spec to choose LayerNorm vs RMSNorm?
     def __new__(cls, config: TransformerConfig, hidden_size: int, eps: float = 1e-5):
+        if LOG_OPS:
+            print(f"TENorm: {config.normalization}")
+        
         if config.normalization == "LayerNorm":
             instance = te.pytorch.LayerNorm(
                 hidden_size=hidden_size,
@@ -127,6 +138,13 @@ class TELinear(te.pytorch.Linear):
         tp_comm_buffer_name: Optional[str] = None,
         is_expert: bool = False,
     ):
+        # Assign a unique layer ID using the global counter
+        global _te_linear_counter
+        _te_linear_counter += 1
+        self.layer_id = _te_linear_counter
+        if LOG_OPS:
+            print(f"TELinear layer id: {self.layer_id}")
+        
         self.config = config
 
         # TE returns a zero length Tensor when bias=False and
@@ -248,6 +266,10 @@ class TELinear(te.pytorch.Linear):
 
     def forward(self, x):
         """Forward."""
+        # Print the shape of input tensor x with the layer ID
+        if LOG_OPS:
+            print(f"TELinear layer id: {self.layer_id}, input tensor shape: {x.shape}")
+        
         _is_first_microbatch = (
             None if self.disable_parameter_transpose_cache else self.is_first_microbatch
         )
@@ -293,6 +315,15 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         skip_weight_param_allocation: bool = False,
         tp_comm_buffer_name: Optional[str] = None,
     ):
+        self.step_num = 0
+        # Assign a unique layer ID using the global counter
+        global _te_layernorm_linear_counter
+        _te_layernorm_linear_counter += 1
+        self.layer_id = _te_layernorm_linear_counter
+        self.dump_debug_tensors = _dump_debug_tensors_layer_norm_linear
+
+        if LOG_OPS:
+            print(f"TELayerNormColumnParallelLinear layer id: {self.layer_id}, normalization: {config.normalization}")
         self.config = config
 
         if gather_output:
@@ -411,11 +442,42 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
 
     def forward(self, x):
         """Forward."""
+        # Print the shape of input tensor x with the layer ID
+        if LOG_OPS:
+            print(f"TELayerNormColumnParallelLinear layer id: {self.layer_id}, input tensor shape: {x.shape}")
+
+        self.step_num += 1
+        
+        if self.dump_debug_tensors and self.layer_id == 1:
+            print(f"step: {self.step_num}, layer id: {self.layer_id}")
+            # Create debug directory if it doesn't exist
+            os.makedirs('/home/scratch.etsykunov_ent/scripts/compare_te1_te2_fp8/debug_tensors_norm_linear', exist_ok=True)
+            
+            # Generate a unique filename
+            filename = f'/home/scratch.etsykunov_ent/scripts/compare_te1_te2_fp8/debug_tensors_norm_linear/layernorm_linear_in_layer_{self.layer_id}_step_{self.step_num}.pt'
+            torch.save(x.detach().clone(), filename)
+
         _is_first_microbatch = (
             None if self.disable_parameter_transpose_cache else self.is_first_microbatch
         )
         out = super().forward(x, is_first_microbatch=_is_first_microbatch)
         self.is_first_microbatch = False
+
+        if self.dump_debug_tensors and self.layer_id == 1:
+            # Create debug directory if it doesn't exist
+            os.makedirs('/home/scratch.etsykunov_ent/scripts/compare_te1_te2_fp8/debug_tensors_norm_linear', exist_ok=True)
+            filename = f'/home/scratch.etsykunov_ent/scripts/compare_te1_te2_fp8/debug_tensors_norm_linear/layernorm_linear_out_layer_{self.layer_id}_step_{self.step_num}.pt'
+            # Handle case where out is a tuple
+            if isinstance(out, tuple):
+                # Save the first element of the tuple (which is typically the tensor output)
+                torch.save(out[0].detach().clone(), filename)
+                # If there's a second element (typically bias), save it separately
+                if len(out) > 1 and out[1] is not None:
+                    bias_filename = f'/home/scratch.etsykunov_ent/scripts/compare_te1_te2_fp8/debug_tensors_norm_linear/layernorm_linear_out_bias_layer_{self.layer_id}_step_{self.step_num}.pt'
+                    torch.save(out[1].detach().clone(), bias_filename)
+            else:
+                # Original case - out is a single tensor
+                torch.save(out.detach().clone(), filename)
 
         # TE only returns a tuple when return_bias is True, otherwise
         # it returns a single Tensor, we always want to return two
@@ -631,7 +693,12 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
         cp_comm_type: str = "p2p",
     ):
         self.step_num = 0
-        self.layer_num = layer_number
+        self.layer_id = layer_number
+        self.dump_debug_tensors = _dump_debug_tensors_attn
+
+        if LOG_OPS:
+            print(f"TEDotProductAttention layer id: {self.layer_id}")
+
         self.config = config
         self.te_forward_mask_type = False
         self.qkv_format: str = 'sbhd'
@@ -764,24 +831,28 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
         packed_seq_params: PackedSeqParams = None,
     ):
         """Forward."""
-        self.step_num += 1
-        print(f"step: {self.step_num}, layer number: {self.layer_num}")
+        # Print the shape of input tensor query with the layer ID
+        if LOG_OPS:
+            print(f"TEDotProductAttention layer id: {self.layer_id}, query tensor shape: {query.shape}")
 
-        if self.step_num <= 15 and self.layer_num == 1:
+        self.step_num += 1
+
+        if self.dump_debug_tensors and self.layer_id == 1:
+            print(f"step: {self.step_num}, layer number: {self.layer_id}")
             # Create debug directory if it doesn't exist
-            os.makedirs('/home/scratch.etsykunov_ent/scripts/te1_vs_te2_fp8/debug_tensors', exist_ok=True)
+            os.makedirs('/home/scratch.etsykunov_ent/scripts/compare_te1_te2_fp8/debug_tensors_attn', exist_ok=True)
             
             # Generate a unique filename
-            filename = f'/home/scratch.etsykunov_ent/scripts/te1_vs_te2_fp8/debug_tensors/core_attn_in_q_layer_{self.layer_num}_step_{self.step_num}.pt'
+            filename = f'/home/scratch.etsykunov_ent/scripts/compare_te1_te2_fp8/debug_tensors_attn/core_attn_in_q_layer_{self.layer_id}_step_{self.step_num}.pt'
             torch.save(query.detach().clone(), filename)
-            filename = f'/home/scratch.etsykunov_ent/scripts/te1_vs_te2_fp8/debug_tensors/core_attn_in_k_layer_{self.layer_num}_step_{self.step_num}.pt'
+            filename = f'/home/scratch.etsykunov_ent/scripts/compare_te1_te2_fp8/debug_tensors_attn/core_attn_in_k_layer_{self.layer_id}_step_{self.step_num}.pt'
             torch.save(key.detach().clone(), filename)
-            filename = f'/home/scratch.etsykunov_ent/scripts/te1_vs_te2_fp8/debug_tensors/core_attn_in_v_layer_{self.layer_num}_step_{self.step_num}.pt'
+            filename = f'/home/scratch.etsykunov_ent/scripts/compare_te1_te2_fp8/debug_tensors_attn/core_attn_in_v_layer_{self.layer_id}_step_{self.step_num}.pt'
             torch.save(value.detach().clone(), filename)
-            filename = f'/home/scratch.etsykunov_ent/scripts/te1_vs_te2_fp8/debug_tensors/core_attn_in_mask_layer_{self.layer_num}_step_{self.step_num}.pt'
+            filename = f'/home/scratch.etsykunov_ent/scripts/compare_te1_te2_fp8/debug_tensors_attn/core_attn_in_mask_layer_{self.layer_id}_step_{self.step_num}.pt'
             torch.save(attention_mask.detach().clone(), filename)
             if attention_bias is not None:
-                filename = f'/home/scratch.etsykunov_ent/scripts/te1_vs_te2_fp8/debug_tensors/core_attn_in_bias_layer_{self.layer_num}_step_{self.step_num}.pt'
+                filename = f'/home/scratch.etsykunov_ent/scripts/compare_te1_te2_fp8/debug_tensors_attn/core_attn_in_bias_layer_{self.layer_id}_step_{self.step_num}.pt'
                 torch.save(attention_bias.detach().clone(), filename)
 
         packed_seq_kwargs = (
@@ -842,12 +913,12 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
                 query, key, value, attention_mask, **attention_bias_kwargs, **packed_seq_kwargs
             )
 
-        if self.step_num <= 15 and self.layer_num == 1:
+        if self.dump_debug_tensors and self.layer_id == 1:
             # Create debug directory if it doesn't exist
-            os.makedirs('/home/scratch.etsykunov_ent/scripts/te1_vs_te2_fp8/debug_tensors', exist_ok=True)
+            os.makedirs('/home/scratch.etsykunov_ent/scripts/compare_te1_te2_fp8/debug_tensors_attn', exist_ok=True)
             
             # Generate a unique filename
-            filename = f'/home/scratch.etsykunov_ent/scripts/te1_vs_te2_fp8/debug_tensors/core_attn_out_layer_{self.layer_num}_step_{self.step_num}.pt'
+            filename = f'/home/scratch.etsykunov_ent/scripts/compare_te1_te2_fp8/debug_tensors_attn/core_attn_out_layer_{self.layer_id}_step_{self.step_num}.pt'
             
             # Save the tensor for inspection
             torch.save(core_attn_out.detach().clone(), filename)
