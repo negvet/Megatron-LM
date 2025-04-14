@@ -203,8 +203,10 @@ if __name__ == "__main__":
     load_context = nullcontext()
     if args.fp8:
         from transformer_engine.pytorch.fp8 import fp8_model_init
+        from transformer_engine.common import recipe
 
-        load_context = fp8_model_init()
+        fp8_recipe = recipe.Float8CurrentScaling(fp8_format=recipe.Format.HYBRID)
+        load_context = fp8_model_init(recipe=fp8_recipe)
     with load_context:
         model = get_model(model_provider, wrap_with_ddp=False)
 
