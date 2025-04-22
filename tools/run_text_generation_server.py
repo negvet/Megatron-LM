@@ -205,9 +205,11 @@ if __name__ == "__main__":
         from transformer_engine.pytorch.fp8 import fp8_model_init
         from transformer_engine.common import recipe
 
-        fp8_recipe = recipe.Float8CurrentScaling(fp8_format=recipe.Format.HYBRID)  # E4M3
+        # fp8_recipe = recipe.Float8CurrentScaling(fp8_format=recipe.Format.HYBRID)  # E4M3
         # fp8_recipe = recipe.MXFP8BlockScaling()
-        # fp8_recipe = recipe.DelayedScaling(amax_history_len=1, amax_compute_algo="most_recent")
+        fp8_recipe = recipe.DelayedScaling(amax_history_len=2, amax_compute_algo="most_recent", fp8_format=recipe.Format.E4M3)
+        # fp8_recipe = recipe.DelayedScaling()
+
         load_context = fp8_model_init(recipe=fp8_recipe)
     with load_context:
         model = get_model(model_provider, wrap_with_ddp=False)
